@@ -18,6 +18,8 @@ def _bt_out(b) -> dict:
         "series_id": b.series_id,
         "created_at": b.created_at.isoformat() if b.created_at else "",
         "label": b.label,
+        "engine_version": (getattr(b, "engine_version", None)
+                           or "1.0-observed-array"),
         "origin_start": b.origin_start,
         "horizon": b.horizon,
         "stride": b.stride,

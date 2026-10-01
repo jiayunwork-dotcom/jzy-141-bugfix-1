@@ -42,6 +42,7 @@ export interface FitResult {
   created_at: string;
   label: string;
   auto: boolean;
+  engine_version: string;
   trend_kind: string;
   seasonal_kind: string;
   period: number;
@@ -49,8 +50,14 @@ export interface FitResult {
   locks: Record<string, number>;
   sse: number;
   aic: number;
+  n_effective: number | null;
+  n_calendar: number | null;
+  missing_count: number | null;
   residuals: number[];
-  fitted: number[];
+  /** One entry per *calendar* position; null at missing weeks. */
+  fitted: (number | null)[];
+  /** Dates of the aligned calendar grid (includes missing weeks). */
+  grid_dates: string[];
   forecast: ForecastInfo;
   initial_state: {
     level: number;
@@ -71,11 +78,11 @@ export interface FitResult {
 export interface OriginRow {
   origin: number;
   train_size: number;
-  forecast: number[];
-  actual: number[];
-  naive_forecast: number[];
-  errors: number[];
-  naive_errors: number[];
+  forecast: (number | null)[];
+  actual: (number | null)[];
+  naive_forecast: (number | null)[];
+  errors: (number | null)[];
+  naive_errors: (number | null)[];
   mae: number;
   mape: number;
   mase: number;
@@ -85,6 +92,8 @@ export interface OriginRow {
   params: HWParams;
   aic: number;
   scale: number;
+  scored_steps?: number;
+  skipped?: boolean;
 }
 
 export interface BacktestResult {
@@ -92,6 +101,7 @@ export interface BacktestResult {
   series_id: number;
   created_at: string;
   label: string;
+  engine_version: string;
   origin_start: number;
   horizon: number;
   stride: number;
@@ -108,6 +118,9 @@ export interface BacktestResult {
     model: { mae: number; mape: number; mase: number };
     naive: { mae: number; mape: number; mase: number };
     model_kind: { trend_kind: string; seasonal_kind: string };
+    skipped_origins?: number[];
+    calendar_size?: number;
+    grid_dates?: string[];
   };
 }
 

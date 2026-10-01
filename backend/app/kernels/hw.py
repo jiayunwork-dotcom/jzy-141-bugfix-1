@@ -10,6 +10,24 @@ Notation
 ``trend`` is one of ``"add"``, ``"add_damped"`` or ``"none"``.
 ``seasonal`` is one of ``"add"`` (additive) or ``"mul"`` (multiplicative).
 
+Inputs are aligned to the *calendar grid*.  Weekly data may contain missing
+weeks (a store renovation, a data pipeline outage): the caller rebuilds the
+continuous week-by-week grid and passes NaN for every missing week.  Grid
+position ``t`` is therefore a *time* index -- the seasonal slot is ``t % m``
+even when the immediately preceding array element is several weeks older.
+
+Missing weeks (NaN) are treated by **propagation without updating**:
+
+* the seasonal slot advances with the calendar position (``t % m``);
+* the state moves forward by the deterministic one/multi-step prediction map
+  (level grows by trend, trend is damped, seasonal indices are *not* touched);
+* no residual is produced, so missing weeks contribute nothing to the SSE,
+  to the AIC sample count, or to the residual variance behind intervals.
+
+This is the state-space equivalent of filling the gap with the model's own
+forecast (which carries zero innovation) and then recursing normally; see the
+"Missing weeks" section below for the rejected alternatives.
+
 State after observing time t (indices are zero based in code):
 
     level   l_t
@@ -34,7 +52,7 @@ Recursions
 
 phi = 1 for the undamped additive trend; b is absent when trend == "none".
 
-Initial state (requires the first TWO complete seasons, indices 0..2m-1)
+Initial state (calendar positions 0..2m-1; gaps allowed)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Let L0 and L1 be the means of the first and the second season.
 
@@ -53,8 +71,20 @@ Let L0 and L1 be the means of the first and the second season.
   (L0 + (i - (m-1)/2) * b) for i = 0..m-1, then normalised so that
   mean(s) = 1.
 
-The recursive fit therefore starts at observation index 2m and every
-forecast error entering the SSE is a genuine out-of-sample one-step error.
+When the first 2m calendar weeks span the full window but contain gaps the
+initial components are estimated by least squares over the *observed* weeks:
+additive model: OLS of y_q on the calendar position q plus m seasonal
+dummies; multiplicative model: OLS of ln y_q on q plus m seasonal dummies,
+then exponentiate the seasonal factors and normalise them to mean 1.  A
+seasonal phase never observed in the window (both q and q+m missing), or too
+few observed weeks to identify the trend, makes the model refuse with a
+message naming what is missing.  With a complete window the OLS solution is
+bit-for-bit the deterministic rule above, so complete-series numbers do not
+change.
+
+The recursive fit therefore starts at calendar position 2m and every
+forecast error entering the SSE is a genuine out-of-sample one-step error
+(only observed weeks contribute a residual).
 """
 from __future__ import annotations
 
@@ -112,34 +142,53 @@ class FitResult:
     params: HWParams
     sse: float
     aic: float
-    n_effective: int          # observations that contributed to SSE
+    n_effective: int          # observed weeks that contributed to SSE
     residuals: np.ndarray     # one-step residuals (n_effective values)
     fitted: np.ndarray        # in-sample fitted values, length = n_effective
-    fitted_index: np.ndarray  # original-series indices of fitted values
+    fitted_index: np.ndarray  # calendar positions of the fitted values
     initial_level: float
     initial_trend: Optional[float]
     initial_season: np.ndarray
     final_state: HWState
     all_fitted: np.ndarray = field(default_factory=lambda: np.zeros(0))
-    # one fitted value per original observation (first 2m are deterministic)
+    # one fitted value per *calendar* position (grid length); missing weeks
+    # hold the state-propagated forecast used in place of an observation
+    n_calendar: int = 0       # length of the aligned weekly grid
+    observed_mask: np.ndarray = field(default_factory=lambda: np.zeros(0,
+                                                                        bool))
+    # True where the grid has an actual observation
+    missing_count: int = 0
+    initial_window_complete: bool = True  # first 2m weeks had no gaps
+    initial_rule: str = "deterministic"
 
 
-def validate_series(y: np.ndarray, seasonal_kind: SeasonalKind, period: int) -> None:
+def validate_series(y: np.ndarray, seasonal_kind: SeasonalKind, period: int) -> np.ndarray:
+    """Validate the calendar-aligned grid and return its observation mask.
+
+    ``y`` is a weekly grid: finite values are observations, NaN marks a
+    missing week.  +-inf is rejected as data corruption, but NaN gaps are a
+    normal, supported case.
+    """
     y = np.asarray(y, dtype=float)
     if y.ndim != 1 or y.size == 0:
         raise ModelError("序列为空，无法拟合。")
-    if not np.all(np.isfinite(y)):
-        raise ModelError("序列包含缺失值或无穷大，请先补齐。")
+    mask = np.isfinite(y)
+    if np.any(np.isposinf(y) | np.isneginf(y)):
+        raise ModelError("序列包含无穷大，请先清理数据。")
+    if not np.any(mask):
+        raise ModelError("序列没有任何有效观测，无法拟合。")
     if period < 2:
         raise ModelError("季节周期必须 >= 2。")
     if y.size < 2 * period:
         raise ModelError(
-            f"至少需要两个完整季节（{2 * period} 个观测），当前只有 {y.size} 个。"
+            f"至少需要跨越两个完整季节（{2 * period} 个日历周），"
+            f"当前网格只有 {y.size} 周。"
         )
-    if seasonal_kind == "mul" and np.any(y <= 0):
+    if seasonal_kind == "mul" and np.any(y[mask] <= 0):
         raise ModelError(
-            "乘法季节模型要求序列全部为正值；序列中存在 0 或负值，已拒绝。"
+            "乘法季节模型要求序列全部为正值；观测中存在 0 或负值，已拒绝。"
         )
+    return mask
 
 
 def _trend_growth(b: float, phi: float, steps: int) -> float:
@@ -153,11 +202,42 @@ def _trend_growth(b: float, phi: float, steps: int) -> float:
 
 def initial_components(
     y: np.ndarray, trend_kind: TrendKind, seasonal_kind: SeasonalKind, period: int
-) -> tuple[float, Optional[float], np.ndarray]:
-    """Estimate initial level / trend / seasonal indices from first 2 seasons."""
+) -> tuple[float, Optional[float], np.ndarray, bool, str]:
+    """Estimate initial level / trend / seasonal indices from the first
+    2m calendar positions.
+
+    Returns ``(l0, b0, seas, window_complete, init_rule)`` where ``l0`` is
+    the level at calendar position 2m-1, ``b0`` is the per-week trend
+    (None when trend_kind == "none") and ``seas`` has m slots indexed by
+    ``q % m``.  ``init_rule`` is "deterministic" for a complete window,
+    "saturated" for a gapped window whose year 1 covers every phase, and
+    "pooled" when some year-1 phases were filled from year-2 evidence.
+    """
     m = period
-    y0 = y[:m]
-    y1 = y[m : 2 * m]
+    win = y[: 2 * m]
+    mask = np.isfinite(win)
+    complete = bool(np.all(mask))
+    if complete:
+        l0, b0, seas = _initial_components_complete(
+            win, trend_kind, seasonal_kind, m
+        )
+        rule = "deterministic"
+    else:
+        l0, b0, seas, rule = _initial_components_gapped(
+            win, mask, trend_kind, seasonal_kind, m
+        )
+    if seasonal_kind == "mul" and np.any(seas <= 0):
+        raise ModelError("初始乘法季节指数出现非正值，请改用加法季节模型。")
+    return l0, b0, seas, complete, rule
+
+
+def _initial_components_complete(
+    win: np.ndarray, trend_kind: TrendKind,
+    seasonal_kind: SeasonalKind, m: int,
+) -> tuple[float, Optional[float], np.ndarray]:
+    """Documented deterministic rule; identical to OLS on a full window."""
+    y0 = win[:m]
+    y1 = win[m:]
     L0 = float(np.mean(y0))
     L1 = float(np.mean(y1))
 
@@ -168,7 +248,7 @@ def initial_components(
     else:
         b0 = (L1 - L0) / m
         l0 = L1 + (m - 1) / 2.0 * b0
-        base = None  # compute per-index below
+        base = None
 
     centre = (m - 1) / 2.0
     if seasonal_kind == "add":
@@ -197,10 +277,129 @@ def initial_components(
                 )
             seas = y0 / denom
         seas = seas / seas.mean()
-
-    if seasonal_kind == "mul" and np.any(seas <= 0):
-        raise ModelError("初始乘法季节指数出现非正值，请改用加法季节模型。")
     return l0, b0, seas
+
+
+def _initial_components_gapped(
+    win: np.ndarray, mask: np.ndarray, trend_kind: TrendKind,
+    seasonal_kind: SeasonalKind, m: int,
+) -> tuple[float, Optional[float], np.ndarray, str]:
+    """Initial components when the first 2m calendar weeks contain gaps.
+
+    Deterministic two-season rule generalised to missing cells; on a
+    complete window the results are bit-for-bit those of
+    :func:`_initial_components_complete`.
+
+    * Trend slope b (additive; log-slope for multiplicative): estimate by
+      ordinary least squares of z_q (z = y or ln y) on calendar position q
+      with a seasonal dummy for every phase, restricted to the observed
+      cells.  With all 2m cells present the design is saturated and the
+      slope equals (L1-L0)/m exactly.
+    * Seasonal slots: deviations from the fitted trend line, year-1 cells
+      preferred; a phase missing from year 1 borrows its year-2 cell
+      ("pooled" slot).  Additive slots are centred to sum 0 over the m
+      phases, multiplicative slots normalised to mean 1.
+    * End-of-window level: L1 + (m-1)/2 b, with L1 the mean of year-2
+      cells detrended at centre (m-1)/2 -- again identical to the
+      deterministic rule on a complete window.
+
+    A phase missing from both years, or too few observations, raises.
+    """
+    qobs = np.arange(2 * m)[mask]
+    if qobs.size < 2:
+        raise ModelError(
+            f"前两个季节（{2 * m} 个日历周）中只有 {qobs.size} 个观测，"
+            "不足以估计初始水平与季节分量，请在缺口两侧补数或更换起点。"
+        )
+    y1p = mask[:m]
+    y2p = mask[m:]
+    both_missing = [k for k in range(m) if not y1p[k] and not y2p[k]]
+    if both_missing:
+        show = ", ".join(str(k + 1) for k in both_missing[:8])
+        more = " …" if len(both_missing) > 8 else ""
+        raise ModelError(
+            "前两个季节内存在整个季节相位两年都未被观测，无法估计季节初值；"
+            f"缺失相位（从 1 数）：{show}{more}。"
+            "请至少在其中一年补齐该周，或提供更长的历史。"
+        )
+    if seasonal_kind == "mul" and np.any(win[mask] <= 0):
+        raise ModelError(
+            "乘法季节模型要求序列全部为正值；前两个季节的观测中存在 0 或负值，"
+            "已拒绝。"
+        )
+
+    z = win if seasonal_kind == "add" else np.log(win)
+    centre = (m - 1) / 2.0
+    k_y1 = np.arange(m)[y1p]
+    k_y2 = np.arange(m)[y2p]
+
+    # --- slope: OLS with phase dummies (reference phase r = last observed
+    # phase; recovered later by centring).  Identical to the deterministic
+    # slope on a complete window.
+    if trend_kind == "none":
+        b = 0.0
+        b0 = None
+    else:
+        if qobs.size < 3:
+            raise ModelError(
+                f"前两个季节中只有 {qobs.size} 个可用观测，无法同时识别趋势与"
+                "季节，请补齐缺口或改用无趋势模型。"
+            )
+        ref = int(k_y1[-1]) if k_y1.size else int(k_y2[-1])
+        active = [k for k in range(m)
+                  if k != ref and (y1p[k] or y2p[k])]
+        Xcols = [np.ones(qobs.size), qobs.astype(float)]
+        for k in active:
+            Xcols.append((qobs % m == k).astype(float))
+        X = np.column_stack(Xcols)
+        rank = int(np.linalg.matrix_rank(X))
+        if rank < X.shape[1]:
+            raise ModelError(
+                "前两个季节的观测不足以同时识别趋势与季节相位，"
+                "请补齐缺口或提供更长的历史。"
+            )
+        beta, *_ = np.linalg.lstsq(X, z[qobs], rcond=None)
+        b = float(beta[1])
+        b0 = b
+
+    # --- year means.  The deterministic rule detrends at centre (m-1)/2;
+    # the seasonal slots use those detrended means, while the end-of-window
+    # level is anchored at the *raw* year-2 mean (complete window identity).
+    def detr(year_offset, ks):
+        return np.array([
+            z[year_offset * m + k] - b * (k - centre) for k in ks
+        ])
+
+    d0 = detr(0, k_y1) if k_y1.size else detr(1, k_y2) - b * m
+    d1 = detr(1, k_y2) if k_y2.size else detr(0, k_y1) + b * m
+    L0 = float(np.mean(d0))
+    L1 = float(np.mean(d1))
+    raw1 = float(np.mean(z[m:][y2p])) if y2p.any() else \
+        float(np.mean(z[:m][y1p])) + b * m
+
+    # --- seasonal slots: year-1 deviation, pooled year-2 if year 1 missing
+    slots = np.full(m, np.nan)
+    for k in k_y1:
+        slots[k] = z[k] - (L0 + (k - centre) * b)
+    if seasonal_kind == "add":
+        shift1 = float(np.nansum(slots) / m)
+        for k in k_y2:
+            if not y1p[k]:
+                slots[k] = z[m + k] - (L1 + (k - centre) * b)
+        slots = slots - float(np.nansum(slots) / m)
+        l0 = L1 if b0 is None else raw1 + (m - 1) / 2.0 * b
+    else:
+        shift1 = float(np.nansum(np.exp(slots)) / m)
+        for k in k_y2:
+            if not y1p[k]:
+                slots[k] = (z[m + k] - (L1 + (k - centre) * b)
+                            + np.log(shift1))
+        raw = np.exp(slots)
+        slots = raw / float(np.nansum(raw) / m)
+        l0 = np.exp(L1 if b0 is None else raw1 + (m - 1) / 2.0 * b)
+
+    rule = "saturated" if bool(np.all(y1p)) else "pooled"
+    return float(l0), b0, slots, rule
 
 
 def _run_recursion(
@@ -209,30 +408,50 @@ def _run_recursion(
     seasonal_kind: SeasonalKind,
     period: int,
     params: HWParams,
-) -> tuple[np.ndarray, np.ndarray, HWState, float, Optional[float], np.ndarray]:
-    """Run the recursive updates over y[2m:].
+) -> tuple[np.ndarray, np.ndarray, HWState, float, Optional[float],
+           np.ndarray, np.ndarray, bool, str]:
+    """Run the recursive updates over calendar positions 2m..n-1.
 
-    Returns (fitted, residuals, final_state, init_level, init_trend,
-    init_season).
+    NaN positions are missing weeks: the state is propagated through them
+    (level advances by trend, seasonal slot advances by calendar position)
+    without any update or residual.
+
+    Returns ``(fitted_grid, residual_grid, final_state, init_level,
+    init_trend, init_season, observed_tail, window_complete)`` where the two
+    grids have length n-2m (NaN at missing positions).
     """
     m = period
-    l, b, seas = initial_components(y, trend_kind, seasonal_kind, m)
+    l, b, seas, complete, init_rule = initial_components(
+        y, trend_kind, seasonal_kind, m
+    )
     init_level, init_trend, init_season = l, b, seas.copy()
     phi = params.phi if trend_kind == "add_damped" else 1.0
     alpha, gamma = params.alpha, params.gamma
     beta = params.beta if trend_kind != "none" else 0.0
 
     n = y.size
-    fitted = np.empty(n - 2 * m)
-    resid = np.empty(n - 2 * m)
+    tail = n - 2 * m
+    fitted_grid = np.full(tail, np.nan)
+    resid_grid = np.full(tail, np.nan)
+    observed_tail = np.zeros(tail, dtype=bool)
     for t in range(2 * m, n):
         k = t % m
+        observed = np.isfinite(y[t])
         growth = _trend_growth(b, phi, 1) if b is not None else 0.0
         level_plus = l + growth
         if seasonal_kind == "add":
             yhat = level_plus + seas[k]
             if not np.isfinite(yhat):
                 raise ModelError("递推过程中拟合值溢出。")
+            fitted_grid[t - 2 * m] = yhat
+            if not observed:
+                # Propagation without updating (zero innovation): the level
+                # advances by phi*b and the trend itself decays to phi*b;
+                # seasonal indices are left untouched.
+                l = level_plus
+                if b is not None:
+                    b = phi * b
+                continue
             e = float(y[t] - yhat)
             l_new = alpha * (y[t] - seas[k]) + (1 - alpha) * level_plus
             seas_new = gamma * (y[t] - l_new) + (1 - gamma) * seas[k]
@@ -243,6 +462,12 @@ def _run_recursion(
             yhat = level_plus * s
             if not np.isfinite(yhat) or yhat <= 0:
                 raise ModelError("乘法模型拟合值非正或溢出。")
+            fitted_grid[t - 2 * m] = yhat
+            if not observed:
+                l = level_plus
+                if b is not None:
+                    b = phi * b
+                continue
             e = float(y[t] - yhat)
             l_new = alpha * (y[t] / s) + (1 - alpha) * level_plus
             if l_new <= 0:
@@ -251,8 +476,8 @@ def _run_recursion(
             if seas_new <= 0:
                 raise ModelError("乘法季节指数在递推中非正，模型失败。")
 
-        fitted[t - 2 * m] = yhat
-        resid[t - 2 * m] = e
+        resid_grid[t - 2 * m] = e
+        observed_tail[t - 2 * m] = True
         if b is not None:
             b = beta * (l_new - l) + (1 - beta) * phi * b
         l = l_new
@@ -273,7 +498,8 @@ def _run_recursion(
         seasonal_kind=seasonal_kind,
         phi=float(phi),
     )
-    return fitted, resid, state, init_level, init_trend, init_season
+    return (fitted_grid, resid_grid, state, init_level, init_trend,
+            init_season, observed_tail, complete, init_rule)
 
 
 def _param_count(trend_kind: TrendKind, seasonal_kind: SeasonalKind) -> int:
@@ -303,29 +529,39 @@ def fit_hw(
     period: int,
     params: HWParams,
 ) -> FitResult:
-    """Fit with *given* smoothing parameters and compute fit statistics."""
+    """Fit with *given* smoothing parameters and compute fit statistics.
+
+    ``y`` is a calendar-aligned weekly grid with NaN for missing weeks.
+    """
     y = np.asarray(y, dtype=float)
-    validate_series(y, seasonal_kind, period)
-    fitted, resid, state, l0, b0, s0 = _run_recursion(
+    mask = validate_series(y, seasonal_kind, period)
+    (fitted_grid, resid_grid, state, l0, b0, s0, observed_tail,
+     window_complete, init_rule) = _run_recursion(
         y, trend_kind, seasonal_kind, period, params
     )
+    fitted = fitted_grid[observed_tail]
+    resid = resid_grid[observed_tail]
     n = resid.size
+    if n == 0:
+        raise ModelError(
+            "前两个季节之后没有任何已观测周，无法计算一步误差与 SSE"
+            "（请提供更长的历史）。"
+        )
     sse = float(np.sum(resid**2))
     aic = aic_from_sse(sse, n, _param_count(trend_kind, seasonal_kind))
 
-    # Deterministic fitted values for the first 2m observations: one-step
-    # forecasts produced from the initial components (l_{2m-1}, b, s) going
-    # backwards conceptually, but here simply reconstructed from the initial
-    # seasonal indices and the initial level/trend.
-    all_fitted = np.empty(y.size)
+    # One fitted value per *calendar* position (length = grid length).  The
+    # first 2m weeks carry the deterministic/OLS in-sample fit; later weeks
+    # carry one-step forecasts.  Missing weeks are NaN: they are not a fit.
+    all_fitted = np.full(y.size, np.nan)
     if trend_kind == "none":
         for i in range(period):
             if seasonal_kind == "add":
-                all_fitted[i] = l0 + s0[i]
-                all_fitted[i + period] = l0 + s0[i]
+                val = l0 + s0[i]
             else:
-                all_fitted[i] = l0 * s0[i]
-                all_fitted[i + period] = l0 * s0[i]
+                val = l0 * s0[i]
+            all_fitted[i] = val
+            all_fitted[i + period] = val
     else:
         phi = params.phi if trend_kind == "add_damped" else 1.0
         # initial state is indexed at t = 2m-1; forecast "back" to earlier
@@ -342,7 +578,8 @@ def fit_hw(
                 all_fitted[i] = level_at + s0[k]
             else:
                 all_fitted[i] = level_at * s0[k]
-    all_fitted[2 * period :] = fitted
+    all_fitted[2 * period :] = fitted_grid
+    all_fitted[~mask] = np.nan
 
     # Shocks used for prediction intervals: raw residuals for the additive
     # error model, relative residuals e/yhat for the multiplicative model.
@@ -366,12 +603,17 @@ def fit_hw(
         n_effective=n,
         residuals=resid,
         fitted=fitted,
-        fitted_index=np.arange(2 * period, y.size),
+        fitted_index=np.arange(2 * period, y.size)[observed_tail],
         initial_level=float(l0),
         initial_trend=b0,
         initial_season=s0,
         final_state=state,
         all_fitted=np.asarray(all_fitted, dtype=float),
+        n_calendar=int(y.size),
+        observed_mask=mask,
+        missing_count=int((~mask).sum()),
+        initial_window_complete=bool(window_complete),
+        initial_rule=str(init_rule),
     )
 
 

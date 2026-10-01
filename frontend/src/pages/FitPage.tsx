@@ -113,7 +113,18 @@ export default function FitPage() {
 
       {series.missing_dates.length > 0 && (
         <div className="alert warn">
-          该序列有 {series.missing_dates.length} 个缺周标记，拟合前请确认数据已补齐。
+          该序列有 {series.missing_dates.length} 个缺周（
+          {series.missing_dates.slice(0, 3).join("、")}
+          {series.missing_dates.length > 3 ? " 等" : ""}
+          ）。拟合时会按日历周网格对齐：缺周只做状态推进、不更新参数、
+          不计入 SSE/AIC，季节相位仍对应真实日历周，无需补齐即可拟合。
+        </div>
+      )}
+      {selectedFit && selectedFit.engine_version === "1.0-observed-array" && (
+        <div className="alert error">
+          这是缺周修复前（按上传数组顺序对齐）算出的历史结果，缺周会导致
+          季节相位错位，参数、SSE、区间和回测都不可与新结果直接比较，
+          请重新拟合后使用。
         </div>
       )}
       {series.values.some((v) => v <= 0) && (
@@ -159,7 +170,7 @@ export default function FitPage() {
                 </div>
               </div>
               <div className="kpi">
-                <div className="k-label">SSE</div>
+                <div className="k-label">SSE（n={selectedFit.n_effective ?? "—"}）</div>
                 <div className="k-value">{fmtNumber(selectedFit.sse, 4)}</div>
               </div>
               <div className="kpi">
@@ -207,6 +218,7 @@ export default function FitPage() {
                   <th></th>
                   <th>时间</th>
                   <th>备注</th>
+                  <th>引擎</th>
                   <th>模型</th>
                   <th>AIC</th>
                   <th>SSE</th>
@@ -229,6 +241,18 @@ export default function FitPage() {
                     </td>
                     <td>{f.created_at.replace("T", " ").slice(0, 19)}</td>
                     <td>{f.label || "—"}</td>
+                    <td>
+                      {f.engine_version === "1.0-observed-array" ? (
+                        <span
+                          title="缺周修复前的旧引擎：季节按数组位置对齐，缺周结果不可信"
+                          style={{ color: "#b42318", fontWeight: 600 }}
+                        >
+                          旧引擎 ⚠
+                        </span>
+                      ) : (
+                        <span className="muted">日历网格</span>
+                      )}
+                    </td>
                     <td>
                       {TREND_KIND_LABEL[f.trend_kind]} /{" "}
                       {f.seasonal_kind === "add" ? "加法" : "乘法"}

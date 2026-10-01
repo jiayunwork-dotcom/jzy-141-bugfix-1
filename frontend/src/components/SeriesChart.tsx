@@ -25,10 +25,34 @@ interface ChartDatum {
 }
 
 export default function SeriesChart({ series, fit }: Props) {
-  const data: ChartDatum[] = series.dates.map((date, i) => ({
+  // New (v2) fits return fitted values aligned to the continuous calendar
+  // grid (null at missing weeks).  Legacy (v1) fits only have one value per
+  // uploaded observation, so fall back to the sparse uploaded dates.
+  const fitDates =
+    fit && fit.grid_dates && fit.grid_dates.length === fit.fitted.length
+      ? fit.grid_dates
+      : series.dates;
+  const fittedByDate = new Map<string, number | null>();
+  if (fit) {
+    fit.fitted.forEach((v, i) => {
+      fittedByDate.set(fitDates[i], v);
+    });
+  }
+
+  // Plot rows for the calendar span: union of uploaded dates and grid dates.
+  const historyDates =
+    fit && fit.grid_dates.length > 0
+      ? Array.from(
+          new Set([...series.dates, ...fit.grid_dates])
+        ).sort()
+      : series.dates;
+  const actualByDate = new Map<string, number>();
+  series.dates.forEach((d, i) => actualByDate.set(d, series.values[i]));
+
+  const data: ChartDatum[] = historyDates.map((date) => ({
     date,
-    actual: series.values[i],
-    fitted: fit ? fit.fitted[i] : undefined,
+    actual: actualByDate.get(date),
+    fitted: fit ? (fittedByDate.get(date) ?? undefined) : undefined,
   }));
 
   if (fit) {
@@ -118,7 +142,7 @@ export default function SeriesChart({ series, fit }: Props) {
         </span>
         {fit && <span>预测区间：{Math.round(fit.forecast.level * 100)}%（{fit.forecast.method === "analytic" ? "解析近似" : "模拟"}）</span>}
       </div>
-      {fit && <ForecastBandTable data={data.slice(series.dates.length)} />}
+      {fit && <ForecastBandTable data={data.slice(historyDates.length)} />}
     </div>
   );
 }

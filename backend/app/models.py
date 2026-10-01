@@ -51,6 +51,12 @@ class Fit(Base):
     )
     label: Mapped[str] = mapped_column(String(255), default="")
     auto: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 1.x = observed-array indexing (gap-unsafe); 2.x = calendar grid with
+    # propagation-without-updating (gap-aware).  Old rows are stamped 1.x by
+    # the startup backfill and shown with a warning in the UI.
+    engine_version: Mapped[str] = mapped_column(
+        String(32), default="2.0-calendar-grid"
+    )
     trend_kind: Mapped[str] = mapped_column(String(20))
     seasonal_kind: Mapped[str] = mapped_column(String(20))
     period: Mapped[int] = mapped_column(Integer)
@@ -58,8 +64,12 @@ class Fit(Base):
     locks: Mapped[dict] = mapped_column(JSON, default=dict)
     sse: Mapped[float] = mapped_column(Float)
     aic: Mapped[float] = mapped_column(Float)
+    n_effective: Mapped[int] = mapped_column(Integer, default=0)
+    n_calendar: Mapped[int] = mapped_column(Integer, default=0)
+    missing_count: Mapped[int] = mapped_column(Integer, default=0)
     residuals: Mapped[list] = mapped_column(JSON)
     fitted: Mapped[list] = mapped_column(JSON)
+    grid_dates: Mapped[list] = mapped_column(JSON, default=list)
     forecast: Mapped[dict] = mapped_column(JSON)
     initial_state: Mapped[dict] = mapped_column(JSON)
     final_state: Mapped[dict] = mapped_column(JSON)
@@ -79,6 +89,9 @@ class Backtest(Base):
         DateTime, default=datetime.utcnow
     )
     label: Mapped[str] = mapped_column(String(255), default="")
+    engine_version: Mapped[str] = mapped_column(
+        String(32), default="2.0-calendar-grid"
+    )
     origin_start: Mapped[int] = mapped_column(Integer)
     horizon: Mapped[int] = mapped_column(Integer)
     stride: Mapped[int] = mapped_column(Integer, default=1)
