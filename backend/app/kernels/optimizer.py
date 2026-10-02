@@ -158,10 +158,15 @@ def optimize(
     period: int,
     locks: Optional[Dict[str, float]] = None,
     progress_cb=None,
+    mask: Optional[np.ndarray] = None,
 ) -> tuple[HWParams, float, float]:
-    """Minimise one-step SSE. Returns (params, sse, aic)."""
+    """Minimise one-step SSE. Returns (params, sse, aic).
+
+    ``mask`` marks observed weeks on the dense grid; missing weeks are
+    propagated without updating the state and do not enter the SSE.
+    """
     y = np.asarray(y, dtype=float)
-    validate_series(y, seasonal_kind, period)
+    mask = validate_series(y, seasonal_kind, period, mask)
     locks = dict(locks or {})
     specs_all = _specs(trend_kind)
     free = [s for s in specs_all if s.name not in locks]
@@ -186,7 +191,7 @@ def optimize(
         unit = _sigmoid(z)
         p = build_params(unit)
         try:
-            res = fit_hw(y, trend_kind, seasonal_kind, period, p)
+            res = fit_hw(y, trend_kind, seasonal_kind, period, p, mask=mask)
             return res.sse
         except ModelError:
             return 1e300
@@ -210,7 +215,7 @@ def optimize(
         raise ModelError("参数优化失败：模型在所有候选参数下均不稳定。")
 
     params = build_params(best_unit)
-    final = fit_hw(y, trend_kind, seasonal_kind, period, params)
+    final = fit_hw(y, trend_kind, seasonal_kind, period, params, mask=mask)
     return params, final.sse, final.aic
 
 

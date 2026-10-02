@@ -20,6 +20,7 @@ class SeriesOut(BaseModel):
     dates: List[str]
     values: List[float]
     missing_dates: List[str] = []
+    grid_dates: List[str] = []
     created_at: str
 
 

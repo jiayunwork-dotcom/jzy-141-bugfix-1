@@ -14,11 +14,14 @@ from ..series_utils import (
     parse_csv,
 )
 from .. import storage
+from ..gaps import build_dense_grid
 
 router = APIRouter(prefix="/api/series", tags=["series"])
 
 
 def _to_out(s) -> SeriesOut:
+    dates = [datetime.fromisoformat(d).date() for d in s.dates]
+    grid_dates, _, _ = build_dense_grid(dates, s.values)
     return SeriesOut(
         id=s.id,
         name=s.name,
@@ -26,6 +29,7 @@ def _to_out(s) -> SeriesOut:
         dates=list(s.dates),
         values=list(s.values),
         missing_dates=list(s.missing_dates or []),
+        grid_dates=[d.isoformat() for d in grid_dates],
         created_at=s.created_at.isoformat() if s.created_at else "",
     )
 

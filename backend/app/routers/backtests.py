@@ -13,6 +13,9 @@ router = APIRouter(prefix="/api/backtests", tags=["backtests"])
 
 
 def _bt_out(b) -> dict:
+    result = b.result or {}
+    version = result.get("results_version")
+    is_legacy = version is None or version < 2
     return {
         "id": b.id,
         "series_id": b.series_id,
@@ -27,7 +30,12 @@ def _bt_out(b) -> dict:
         "trend_kind": b.trend_kind,
         "seasonal_kind": b.seasonal_kind,
         "locks": b.locks,
-        "result": b.result,
+        "result": result,
+        "legacy": is_legacy,
+        "legacy_reason": (
+            "旧版结果：原点与季节朴素基准按压缩下标对齐，缺周序列上"
+            "日期/MASE 可能错位，不与当前缺周感知结果可比，请重新回测。"
+        ) if is_legacy else None,
     }
 
 

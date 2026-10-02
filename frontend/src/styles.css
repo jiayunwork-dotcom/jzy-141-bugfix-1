@@ -233,6 +233,29 @@ th {
   color: #1c4fa8;
 }
 
+.legacy-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: #fdecea;
+  border: 1px solid #f3b7b0;
+  color: var(--danger);
+  cursor: help;
+  white-space: nowrap;
+}
+
+.new-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: #e7f6ee;
+  border: 1px solid #9fceb5;
+  color: var(--primary);
+  white-space: nowrap;
+}
+
 .muted {
   color: var(--muted);
   font-size: 12px;

@@ -13,8 +13,13 @@ from .. import service, storage
 
 router = APIRouter(prefix="/api/fits", tags=["fits"])
 
+# Results created before gap-aware dense-grid handling (version 2).
+LEGACY_VERSION = 1
+
 
 def _fit_out(f) -> dict:
+    version = getattr(f, "results_version", None)
+    is_legacy = version is None or version < 2
     return {
         "id": f.id,
         "series_id": f.series_id,
@@ -28,12 +33,21 @@ def _fit_out(f) -> dict:
         "locks": f.locks,
         "sse": f.sse,
         "aic": f.aic,
+        "n_effective": getattr(f, "n_effective", None),
         "residuals": f.residuals,
         "fitted": f.fitted,
         "forecast": f.forecast,
         "initial_state": f.initial_state,
         "final_state": f.final_state,
         "scores": f.scores or [],
+        "grid_dates": getattr(f, "grid_dates", None),
+        "missing_indices": getattr(f, "missing_indices", None),
+        "results_version": version,
+        "legacy": is_legacy,
+        "legacy_reason": (
+            "旧版结果：在缺周序列上按压缩下标建模，季节相位可能错位，"
+            "不与当前缺周感知结果可比，请重新拟合。"
+        ) if is_legacy else None,
     }
 
 

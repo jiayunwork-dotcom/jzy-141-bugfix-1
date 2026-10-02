@@ -81,6 +81,11 @@ export default function BacktestPage() {
 
   if (!series) return <div className="muted">加载中…</div>;
   const minOrigin = 2 * series.period;
+  // Origins are positions on the dense weekly calendar grid.
+  const gridDates =
+    selected?.result.grid_dates ?? series.grid_dates ?? series.dates;
+  const dateAt = (idx: number) =>
+    gridDates[idx] ?? series.dates[Math.min(idx, series.dates.length - 1)];
 
   return (
     <div>
@@ -93,6 +98,23 @@ export default function BacktestPage() {
 
       {error && <div className="alert error">{error}</div>}
 
+      {selected?.legacy && (
+        <div className="alert error">
+          ⚠ 旧算法结果（缺周感知修复前生成）：{selected.legacy_reason}
+        </div>
+      )}
+
+      {selected && !selected.legacy &&
+        selected.result.skipped_origins?.length > 0 && (
+        <div className="alert warn">
+          {selected.result.skipped_origins.length} 个原点因原点周或留出窗口内
+          存在缺周而被跳过（无实际值可评分）：
+          {selected.result.skipped_origins
+            .map((s) => s.origin_date ?? `#${s.origin}`)
+            .join("、")}
+        </div>
+      )}
+
       <div className="panel">
         <h2>回测设置</h2>
         <div className="row">
@@ -101,7 +123,7 @@ export default function BacktestPage() {
             <input
               type="number"
               min={minOrigin}
-              max={series.dates.length - horizon}
+              max={(series.grid_dates ?? series.dates).length - horizon}
               value={originStart}
               onChange={(e) => setOriginStart(Number(e.target.value))}
             />
@@ -267,9 +289,9 @@ export default function BacktestPage() {
                 </thead>
                 <tbody>
                   {selected.result.origins.map((o, idx) => (
-                    <tr key={o.origin}>
+                    <tr key={o.origin} className={undefined}>
                       <td>{idx + 1}</td>
-                      <td>{series.dates[o.origin]}</td>
+                      <td>{o.origin_date ?? dateAt(o.origin)}</td>
                       <td>{o.train_size}</td>
                       <td>{fmtNumber(o.mae, 3)}</td>
                       <td>{fmtNumber(o.naive_mae, 3)}</td>
@@ -285,7 +307,11 @@ export default function BacktestPage() {
             </div>
           </div>
 
-          <OriginDetailPanel bt={selected} series={series} />
+          <OriginDetailPanel
+            bt={selected}
+            series={series}
+            gridDates={gridDates}
+          />
         </>
       )}
 
@@ -300,6 +326,7 @@ export default function BacktestPage() {
                 <tr>
                   <th></th>
                   <th>时间</th>
+                  <th>版本</th>
                   <th>起点</th>
                   <th>h</th>
                   <th>步长</th>
@@ -320,6 +347,18 @@ export default function BacktestPage() {
                       />
                     </td>
                     <td>{b.created_at.replace("T", " ").slice(0, 19)}</td>
+                    <td>
+                      {b.legacy ? (
+                        <span
+                          className="legacy-badge"
+                          title={b.legacy_reason ?? undefined}
+                        >
+                          旧算法
+                        </span>
+                      ) : (
+                        <span className="new-badge">缺周感知</span>
+                      )}
+                    </td>
                     <td>{b.origin_start}</td>
                     <td>{b.horizon}</td>
                     <td>{b.stride}</td>
@@ -353,13 +392,17 @@ function winnerCell(
 function OriginDetailPanel({
   bt,
   series,
+  gridDates,
 }: {
   bt: BacktestResult;
   series: Series;
+  gridDates: string[];
 }) {
   const [idx, setIdx] = useState(0);
   const row = bt.result.origins[Math.min(idx, bt.result.origins.length - 1)];
   if (!row) return null;
+  const dateAt = (i: number) =>
+    gridDates[i] ?? series.dates[Math.min(i, series.dates.length - 1)];
   return (
     <div className="panel">
       <h2>单原点预测对照</h2>
@@ -369,11 +412,17 @@ function OriginDetailPanel({
           <select value={idx} onChange={(e) => setIdx(Number(e.target.value))}>
             {bt.result.origins.map((o, i) => (
               <option key={o.origin} value={i}>
-                #{i + 1} · {series.dates[o.origin]}
+                #{i + 1} · {o.origin_date ?? dateAt(o.origin)}
               </option>
             ))}
           </select>
         </div>
+        {row.skipped_naive > 0 && (
+          <div className="muted" style={{ alignSelf: "center" }}>
+            {row.skipped_naive} 个朴素预测因去年同期缺周不可用，已从朴素指标中
+            剔除（不做猜测）。
+          </div>
+        )}
       </div>
       <div className="table-wrap">
         <table>
@@ -392,12 +441,20 @@ function OriginDetailPanel({
             {row.forecast.map((f, j) => (
               <tr key={j}>
                 <td>{j + 1}</td>
-                <td>{series.dates[row.origin + j]}</td>
+                <td>{dateAt(row.origin + j)}</td>
                 <td>{fmtNumber(row.actual[j], 2)}</td>
                 <td>{fmtNumber(f, 2)}</td>
                 <td>{fmtNumber(row.errors[j], 2)}</td>
-                <td>{fmtNumber(row.naive_forecast[j], 2)}</td>
-                <td>{fmtNumber(row.naive_errors[j], 2)}</td>
+                <td>
+                  {row.naive_forecast[j] == null
+                    ? "—（去年缺周）"
+                    : fmtNumber(row.naive_forecast[j] as number, 2)}
+                </td>
+                <td>
+                  {row.naive_errors[j] == null
+                    ? "—"
+                    : fmtNumber(row.naive_errors[j] as number, 2)}
+                </td>
               </tr>
             ))}
           </tbody>

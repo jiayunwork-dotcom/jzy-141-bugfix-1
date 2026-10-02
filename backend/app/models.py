@@ -64,6 +64,12 @@ class Fit(Base):
     initial_state: Mapped[dict] = mapped_column(JSON)
     final_state: Mapped[dict] = mapped_column(JSON)
     scores: Mapped[list] = mapped_column(JSON, default=list)
+    # gap-aware dense-grid results (results_version == 2); legacy rows have
+    # NULL grid_dates and were computed on the compressed observed list.
+    n_effective: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    grid_dates: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    missing_indices: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    results_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     series: Mapped[Series] = relationship(back_populates="fits")
 

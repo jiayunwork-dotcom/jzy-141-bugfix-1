@@ -25,10 +25,29 @@ interface ChartDatum {
 }
 
 export default function SeriesChart({ series, fit }: Props) {
-  const data: ChartDatum[] = series.dates.map((date, i) => ({
+  // Gap-aware results (version >= 2) align fitted values on the dense weekly
+  // grid.  Legacy results were stored against the compressed observed list,
+  // so they fall back to the sparse observed dates.
+  const gapAware = !!fit && fit.legacy === false && !!fit.grid_dates;
+  const axisDates = gapAware && fit?.grid_dates
+    ? fit.grid_dates
+    : series.grid_dates?.length
+      ? series.grid_dates
+      : series.dates;
+  const actualByDate = new Map(
+    series.dates.map((d, i) => [d, series.values[i]])
+  );
+
+  const data: ChartDatum[] = axisDates.map((date, i) => ({
     date,
-    actual: series.values[i],
-    fitted: fit ? fit.fitted[i] : undefined,
+    actual: actualByDate.get(date),
+    fitted: fit
+      ? gapAware
+        ? (fit.fitted[i] ?? undefined)
+        : i < series.dates.length && date === series.dates[i]
+          ? (fit.fitted[i] ?? undefined)
+          : undefined
+      : undefined,
   }));
 
   if (fit) {
@@ -118,7 +137,7 @@ export default function SeriesChart({ series, fit }: Props) {
         </span>
         {fit && <span>预测区间：{Math.round(fit.forecast.level * 100)}%（{fit.forecast.method === "analytic" ? "解析近似" : "模拟"}）</span>}
       </div>
-      {fit && <ForecastBandTable data={data.slice(series.dates.length)} />}
+      {fit && <ForecastBandTable data={data.slice(axisDates.length)} />}
     </div>
   );
 }

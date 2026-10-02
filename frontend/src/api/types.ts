@@ -5,6 +5,8 @@ export interface Series {
   dates: string[];
   values: number[];
   missing_dates: string[];
+  /** Dense weekly calendar grid (one entry per Monday, gaps included). */
+  grid_dates: string[];
   created_at: string;
 }
 
@@ -49,8 +51,10 @@ export interface FitResult {
   locks: Record<string, number>;
   sse: number;
   aic: number;
+  n_effective: number | null;
   residuals: number[];
-  fitted: number[];
+  /** One fitted value per dense-grid week; null at missing weeks. */
+  fitted: (number | null)[];
   forecast: ForecastInfo;
   initial_state: {
     level: number;
@@ -66,6 +70,11 @@ export interface FitResult {
     phi: number;
   };
   scores: CandidateScore[];
+  grid_dates: string[] | null;
+  missing_indices: number[] | null;
+  results_version: number | null;
+  legacy: boolean;
+  legacy_reason: string | null;
 }
 
 export interface OriginRow {
@@ -73,9 +82,9 @@ export interface OriginRow {
   train_size: number;
   forecast: number[];
   actual: number[];
-  naive_forecast: number[];
+  naive_forecast: (number | null)[];
   errors: number[];
-  naive_errors: number[];
+  naive_errors: (number | null)[];
   mae: number;
   mape: number;
   mase: number;
@@ -85,6 +94,8 @@ export interface OriginRow {
   params: HWParams;
   aic: number;
   scale: number;
+  origin_date: string | null;
+  skipped_naive: number;
 }
 
 export interface BacktestResult {
@@ -108,7 +119,17 @@ export interface BacktestResult {
     model: { mae: number; mape: number; mase: number };
     naive: { mae: number; mape: number; mase: number };
     model_kind: { trend_kind: string; seasonal_kind: string };
+    grid_dates: string[] | null;
+    skipped_origins: Array<{
+      origin: number;
+      origin_date: string | null;
+      reason: string;
+      missing: (string | number)[];
+    }>;
+    results_version?: number;
   };
+  legacy: boolean;
+  legacy_reason: string | null;
 }
 
 export interface Job {

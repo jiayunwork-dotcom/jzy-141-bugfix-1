@@ -80,17 +80,18 @@ def fit_one(
     seasonal_kind: SeasonalKind,
     period: int,
     locks: Optional[Dict[str, float]] = None,
+    mask: Optional[np.ndarray] = None,
 ) -> FitResult:
     """Fit a specific combination (used by the manual panel too)."""
     if locks:
         params, sse, aic = optimizer.optimize(
-            y, trend_kind, seasonal_kind, period, locks=locks
+            y, trend_kind, seasonal_kind, period, locks=locks, mask=mask
         )
-        return fit_hw(y, trend_kind, seasonal_kind, period, params)
+        return fit_hw(y, trend_kind, seasonal_kind, period, params, mask=mask)
     params, _, _ = optimizer.optimize(
-        y, trend_kind, seasonal_kind, period
+        y, trend_kind, seasonal_kind, period, mask=mask
     )
-    return fit_hw(y, trend_kind, seasonal_kind, period, params)
+    return fit_hw(y, trend_kind, seasonal_kind, period, params, mask=mask)
 
 
 def auto_select(
@@ -98,6 +99,7 @@ def auto_select(
     period: int,
     locks: Optional[Dict[str, float]] = None,
     progress_cb=None,
+    mask: Optional[np.ndarray] = None,
 ) -> SelectionResult:
     y = np.asarray(y, dtype=float)
     scores: List[CandidateScore] = []
@@ -105,9 +107,9 @@ def auto_select(
     for i, (tk, sk) in enumerate(GRID):
         try:
             params, sse, aic = optimizer.optimize(
-                y, tk, sk, period, locks=locks
+                y, tk, sk, period, locks=locks, mask=mask
             )
-            fr = fit_hw(y, tk, sk, period, params)
+            fr = fit_hw(y, tk, sk, period, params, mask=mask)
         except ModelError as exc:
             scores.append(
                 CandidateScore(tk, sk, feasible=False, reason=str(exc))

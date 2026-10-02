@@ -113,7 +113,11 @@ export default function FitPage() {
 
       {series.missing_dates.length > 0 && (
         <div className="alert warn">
-          该序列有 {series.missing_dates.length} 个缺周标记，拟合前请确认数据已补齐。
+          该序列有 {series.missing_dates.length} 个缺周（
+          {series.missing_dates.slice(0, 3).join("、")}
+          {series.missing_dates.length > 3 ? " 等" : ""}
+          ）。拟合在稠密周网格上进行：缺周不补估计值，只把状态向前递推、
+          不更新分量、不计入 SSE/AIC 的样本数，季节相位按日历周对齐。
         </div>
       )}
       {series.values.some((v) => v <= 0) && (
@@ -122,6 +126,12 @@ export default function FitPage() {
         </div>
       )}
       {formError && <div className="alert error">{formError}</div>}
+
+      {selectedFit?.legacy && (
+        <div className="alert error">
+          ⚠ 旧算法结果（缺周感知修复前生成）：{selectedFit.legacy_reason}
+        </div>
+      )}
 
       <ParamPanel
         auto={auto}
@@ -208,6 +218,7 @@ export default function FitPage() {
                   <th>时间</th>
                   <th>备注</th>
                   <th>模型</th>
+                  <th>版本</th>
                   <th>AIC</th>
                   <th>SSE</th>
                   <th>α</th>
@@ -232,6 +243,18 @@ export default function FitPage() {
                     <td>
                       {TREND_KIND_LABEL[f.trend_kind]} /{" "}
                       {f.seasonal_kind === "add" ? "加法" : "乘法"}
+                    </td>
+                    <td>
+                      {f.legacy ? (
+                        <span
+                          className="legacy-badge"
+                          title={f.legacy_reason ?? undefined}
+                        >
+                          旧算法
+                        </span>
+                      ) : (
+                        <span className="new-badge">缺周感知</span>
+                      )}
                     </td>
                     <td>{fmtNumber(f.aic, 2)}</td>
                     <td>{fmtNumber(f.sse, 3)}</td>
